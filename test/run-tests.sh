@@ -15,6 +15,26 @@
 
 set -e
 
-for x in $(ls test/*-test.js); do
+# Move to root of project.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+cd ${SCRIPT_DIR}/..
+
+# Run tests.
+for x in $(ls ./test/*-test.js); do
   node $x
 done
+
+# Run linter.
+echo "Linting..."
+./tools/lint.sh
+echo "[ OK ]"
+
+# Make sure keyword dumper runs.
+echo "Keyword dumping..."
+./tools/keyword_dump.js >/dev/null
+echo "[ OK ]"
+
+# Test packaging.
+echo "Test packaging..."
+npm publish --dry-run >/dev/null 2>/dev/null
+echo "[ OK ]"

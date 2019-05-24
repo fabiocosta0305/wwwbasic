@@ -16,87 +16,53 @@
 
 var basic_test = require('./basic-tester.js');
 
-basic_test.BASIC_TEST('DoLoopWhile', 'OneToFive', `
-i = 1
-DO
-  PRINT i
-  i = i + 1
-LOOP WHILE i <= 5
+basic_test.BASIC_TEST('OnGosub', 'TwoSubroutines', `
+FOR i%=1 TO 2
+  ON i% GOSUB One, Two
+NEXT i%
+PRINT "done"
+END
+One: 
+  PRINT i%
+  RETURN
+Two: 
+  PRINT i%
+  RETURN
 `, `
 1
 2
-3
-4
-5
+done
 `);
 
-basic_test.BASIC_TEST('DoLoopWhile', 'SixToOne', `
-i = 6
-DO
-  PRINT i
-  i = i - 1
-LOOP WHILE i > 0
+basic_test.BASIC_TEST('OnGosub', 'SubroutineAtLines', `
+10  FOR i=1 TO 2
+20    ON i GOSUB 60,80
+30  NEXT i
+40  PRINT "done"
+50  END
+60  PRINT "1"
+70  RETURN
+80  PRINT "2"
+90  RETURN
 `, `
-6
-5
-4
-3
-2
 1
+2
+done
 `);
 
-basic_test.BASIC_TEST('DoLoopWhile', 'LoopUntilSixToOne', `
-i = 6
-DO
-  PRINT i
-  i = i - 1
-LOOP UNTIL i = 0
+basic_test.BASIC_TEST('OnGosub', 'OutOfRange', `
+ON 0 GOSUB a,b
+ON 5 GOSUB a,b
+ON 3 GOSUB a,b,c
+PRINT "done"
+END
+a: 
+  PRINT "a"
+  RETURN
+b:
+  PRINT "b"
+  RETURN
 `, `
-6
-5
-4
-3
-2
-1
-`);
-
-basic_test.BASIC_TEST('DoLoopWhile', 'LoopSideBySide', `
-i = 6
-DO
-  PRINT i
-  i = i - 1
-LOOP UNTIL i = 0
-DO
-  PRINT i
-  i = i + 1
-LOOP UNTIL i = 4
-`, `
-6
-5
-4
-3
-2
-1
-0
-1
-2
-3
-`);
-
-basic_test.BASIC_TEST('DoLoopWhile', 'JustDoLoop', `
-i = 6
-DO
-  PRINT i
-  i = i - 1
-  IF i = 0 THEN GOTO done
-LOOP
-done:
-`, `
-6
-5
-4
-3
-2
-1
+done
 `);
 

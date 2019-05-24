@@ -16,21 +16,22 @@
 
 (function() {
   var DYNAMIC_HEAP_SIZE = 1024 * 1024 * 16;
+  var STACK_SIZE = 64 * 1024;
   var MAX_DIMENSIONS = 7;
   var BLACK = 0xff000000;
   var WHITE = 0xffffffff;
 
   var SIMPLE_TYPE_INFO = {
-  'byte': {array: 'Uint8Array', size: 1, shift: 0, view: 'b'},
-  'short': {array: 'Int16Array', size: 2, shift: 1, view: 'i16'},
-  'long': {array: 'Int32Array', size: 4, shift: 2, view: 'i'},
-  'single': {array: 'Float32Array', size: 4, shift: 2, view: 's'},
-  'double': {array: 'Float64Array', size: 8, shift: 3, view: 'd'},
-  'string': {array: 'Array', size: 1, shift: 0, view: 'str'},
+    'byte': {array: 'Uint8Array', size: 1, shift: 0, view: 'b'},
+    'short': {array: 'Int16Array', size: 2, shift: 1, view: 'i16'},
+    'long': {array: 'Int32Array', size: 4, shift: 2, view: 'i'},
+    'single': {array: 'Float32Array', size: 4, shift: 2, view: 's'},
+    'double': {array: 'Float64Array', size: 8, shift: 3, view: 'd'},
+    'string': {array: 'Array', size: 1, shift: 0, view: 'str'},
   };
 
   var IMPLICIT_TYPE_MAP = {
-  '$': 'string', '%': 'short', '&': 'long', '!': 'single', '#': 'double',
+    '$': 'string', '%': 'short', '&': 'long', '!': 'single', '#': 'double',
   };
 
   function NextChar(ch) {
@@ -52,7 +53,7 @@
       ctx.restore();
       var pix = ctx.getImageData(0, 0, 8, height);
       var pdata = pix.data;
-      for (var j = 0; j < pdata.length; j+=4) {
+      for (var j = 0; j < pdata.length; j += 4) {
         var level = pdata[j] * 0.1140 +
                     pdata[j + 1] * 0.5870 +
                     pdata[j + 2] * 0.2989;
@@ -68,9 +69,9 @@
     for (var i = 0; i < 256; ++i) {
       var row = Math.floor(i / 8);
       var col = i % 8;
-      for(var y = 0; y < 8; ++y) {
+      for (var y = 0; y < 8; ++y) {
         for (var d = 0; d < dup; ++d) {
-          for(var x = 0; x < 8; ++x) {
+          for (var x = 0; x < 8; ++x) {
             data[pos++] = s[x + y * 8 * 8 + col * 8 + row * 64 * 8]
               != ' ' ? 255 : 0;
           }
@@ -90,7 +91,7 @@
     }
   }
 
-  function Interpret(code, canvas) {
+  function Interpret(code, canvas, from_tag) {
     // Display Info (in browser only).
     var screen_mode = 0;
     var screen_bpp = 4;
@@ -132,23 +133,32 @@
     var data_labels = {};
     var flow = [];
     var types = {};
-    var subroutines = {};
     var functions = {};
     var global_vars = {};
     var vars = global_vars;
     var allocated = 0;
-    var str_count = 0;
     var const_count = 0;
+    var temp_count = 0;
+    var inside_type = false;
+    var inside_function = false;
     var var_decls = '';
-    var rstack = [];
     var data = [];
     var data_pos = 0;
     var ops = [];
     var curop = '';
     var ip = 0;
+    var function_define_pos = 0;
+    var function_old_allocated = 0;
+    var function_name = null;
+
+    // Call stack
+    var stack = 0;
+    var sp = 0;
+    var bp = 0;
 
     // Input State
     var keys = [];
+    var input_string = '';
     var mouse_x = 0;
     var mouse_y = 0;
     var mouse_buttons = 0;
@@ -183,25 +193,29 @@
     var pen_x = 0;
     var pen_y = 0;
 
-    var toklist = [
+    const toklist = [
       ':', ';', ',', '(', ')', '{', '}', '[', ']',
       '+=', '-=', '*=', '/=', '\\=', '^=', '&=',
       '+', '-', '*', '/', '\\', '^', '&', '.',
       '<=', '>=', '<>', '=>', '=', '<', '>', '@', '\n',
     ];
-    if (canvas) {
+    code = code.replace(/\r/g, ' ');
+    code = code.replace(/\t/g, ' ');
+    if (from_tag) {
       code = code.replace(/&lt;/g, '<');
       code = code.replace(/&gt;/g, '>');
       code = code.replace(/&amp;/g, '&');
     }
 
     var tok = null;
+    var tok_count = 0;
     var line = canvas ? 0 : 1;
 
     function Next() {
       tok = '';
+      tok_count++;
       for (;;) {
-        while (code.substr(0, 1) == ' '  ||
+        while (code.substr(0, 1) == ' ' ||
                code.substr(0, 1) == '\t') {
           if (tok != '') {
             return;
@@ -252,13 +266,16 @@
           }
           tok = n[1];
           code = code.substr(tok.length);
+          if (tok[tok.length - 1] == '#') {
+            tok = tok.substr(0, tok.length - 1);
+          }
           return;
         }
         for (var i = 0; i < toklist.length; ++i) {
           if (code.substr(0, toklist[i].length) == toklist[i]) {
             if (tok != '') {
               if (code.substr(0, 1) == '&' &&
-                code.substr(code.length-1) != '$') {
+                code.substr(code.length - 1) != '$') {
                 tok += '&';
                 code = code.substr(1);
               }
@@ -345,7 +362,7 @@
 
     function Skip(t) {
       if (tok != t) {
-        Throw('Expected "'+ t + '" found "' + tok + '"');
+        Throw('Expected "' + t + '" found "' + tok + '"');
       }
       Next();
     }
@@ -418,6 +435,23 @@
       }
     }
 
+    function VarPtr(vname) {
+      var vinfo;
+      if (vars[vname] !== undefined) {
+        vinfo = vars[vname];
+      } else if (global_vars[vname] !== undefined) {
+        vinfo = global_vars[vname];
+      }
+      if (vinfo === undefined) {
+        Throw('Undefined variable name');
+      }
+      if (vinfo.global) {
+        return vinfo.offset;
+      } else {
+        return '(bp + ' + vinfo.offset + ')';
+      }
+    }
+
     function AddLabel(name) {
       if (labels[name] !== undefined) {
         Throw('Label ' + name + ' defined twice');
@@ -457,14 +491,21 @@
           var vname = tok;
           Next();
           Skip(')');
-          if (vars[vname] === undefined) {
-            Throw('Undefined variable name');
-          }
-          return vars[vname].offset;
+          return VarPtr(vname);
+        }
+        if (name == 'stackdepth') {
+          Skip('(');
+          Skip(')');
+          return 'sp';
+        }
+        if (name == 'basedepth') {
+          Skip('(');
+          Skip(')');
+          return 'bp';
         }
         if (name == 'log' || name == 'ucase$' || name == 'lcase$' ||
             name == 'chr$' || name == 'sqr' ||
-            name == 'int' || name == 'cint' ||
+            name == 'int' || name == 'cint' || name == 'asc' ||
             name == 'abs' || name == 'len' || name == 'val' ||
             name == 'cos' || name == 'sin' || name == 'tan' || name == 'atn' ||
             name == 'exp' || name == 'str$' || name == 'peek' ||
@@ -474,28 +515,29 @@
           var e = Expression();
           Skip(')');
           switch (name) {
-            case 'log': return 'Math.log(' + e + ')';
-            case 'ucase$': return '(' + e + ').toUpperCase()';
-            case 'lcase$': return '(' + e + ').toLowerCase()';
-            case 'chr$': return 'String.fromCharCode(' + e + ')';
-            case 'asc': return '(' + e + ').toCharCode(0)';
-            case 'sqr': return 'Math.sqrt(' + e + ')';
-            case 'int': return 'Math.floor(' + e + ')';
-            case 'cint': return 'Math.floor(' + e + ')';
-            case 'abs': return 'Math.abs(' + e + ')';
-            case 'cos': return 'Math.cos(' + e + ')';
-            case 'sin': return 'Math.sin(' + e + ')';
-            case 'tan': return 'Math.tan(' + e + ')';
-            case 'atn': return 'Math.atan(' + e + ')';
-            case 'exp': return 'Math.exp(' + e + ')';
-            case 'str$': return '(' + e + ').toString()';
-            case 'val': return 'parseInt(' + e + ')';
-            case 'peek': return 'Peek(' + e + ').toString()';
-            case 'len': return '((' + e + ').length)';
-            case 'ltrim$': return '((' + e + ').trimStart())';
-            case 'rtrim$': return '((' + e + ').trimEnd())';
-            case 'space$': return 'StringRep((' + e + '), " ")';
-            case 'tab': return 'StringRep((' + e + '), "\t")';
+          case 'log': return 'Math.log(' + e + ')';
+          case 'ucase$': return '(' + e + ').toUpperCase()';
+          case 'lcase$': return '(' + e + ').toLowerCase()';
+          case 'chr$': return 'String.fromCharCode(' + e + ')';
+          case 'asc': return '(' + e + ').charCodeAt(0)';
+          case 'sqr': return 'Math.sqrt(' + e + ')';
+          case 'int': return 'Math.floor(' + e + ')';
+          case 'cint': return 'Math.floor(' + e + ')';
+          case 'abs': return 'Math.abs(' + e + ')';
+          case 'cos': return 'Math.cos(' + e + ')';
+          case 'sin': return 'Math.sin(' + e + ')';
+          case 'tan': return 'Math.tan(' + e + ')';
+          case 'atn': return 'Math.atan(' + e + ')';
+          case 'exp': return 'Math.exp(' + e + ')';
+          case 'str$': return 'ToString(' + e + ')';
+          case 'val': return 'parseInt(' + e + ')';
+          case 'peek': return 'Peek(' + e + ').toString()';
+          case 'len': return '((' + e + ').length)';
+          case 'ltrim$': return '((' + e + ').trimStart())';
+          case 'rtrim$': return '((' + e + ').trimEnd())';
+          case 'space$': return 'StringRep((' + e + '), " ")';
+          case 'tab': return 'StringRep((' + e + '), "\t")';
+          case 'stackdepth': return 'sp';
           }
           Throw('This cannot happen');
         }
@@ -516,7 +558,7 @@
           } else if (name == 'right$') {
             return 'Right((' + a + '), (' + b + '))';
           } else if (name == 'instr') {
-            return '(' + a + ').search(' + b + ')';
+            return '((' + a + ').search(' + b + ') + 1)';
           } else if (name == 'point') {
             return 'Point((' + a + '), (' + b + '))';
           } else {
@@ -531,7 +573,7 @@
           Skip(',');
           var c = Expression();
           Skip(')');
-          return '((' + a + ').substr((' + b + '), (' + c + ')))';
+          return '((' + a + ').substr((' + b + ') - 1, (' + c + ')))';
         }
         if (name == 'inkey$') {
           return 'Inkey()';
@@ -539,18 +581,8 @@
         if (name == 'timer') {
           return 'GetTimer()';
         }
-        if (functions[name] !== undefined) {
-          Skip('(');
-          while (tok != ')') {
-            var a = Expression();
-            if (tok != ',') {
-              break;
-            }
-            Skip(',');
-          }
-          Skip(')');
-          // TODO: Implement.
-          return '0';
+        if (functions[name] !== undefined && !functions[name].is_subroutine) {
+          return FunctionCall(name, {is_subroutine: false});
         }
         return IndexVariable(name);
       }
@@ -589,8 +621,8 @@
     function Term2() {
       var a = Factor();
       while (tok == '\\') {
-        var b = Next();
-        Factor();
+        Next();
+        var b = Factor();
         a = 'Math.floor((' + a + ')/(' + b + '))';
       }
       return a;
@@ -713,30 +745,40 @@
         Throw('Unknown type');
       }
       var size = info.size;
-      var offset;
-      if (type_name == 'string') {
-        offset = str_count++;
-      } else {
-        offset = Allocate(size);
-      }
-      var_decls += '// ' + name + ' is at ' + offset + '\n';
+      var offset = Allocate(size);
       vars[name] = {
         offset: offset,
         dimensions: 0,
         type_name: type_name,
+        global: vars === global_vars,
       };
-      if (defaults.length > 0) {
-        curop += IndexVariable(name) + ' = ' + defaults[0] + ';\n';
+      if (inside_type) {
+        var_decls += '//   field ' + name + ' is at ' + offset + '\n';
+      } else if (vars[name].global) {
+        var_decls += '// ' + name + ' is at ' + offset + '\n';
+      } else {
+        if (inside_function) {
+          curop += '//   ' + name + ' is at (bp + ' + offset + ')\n';
+        } else {
+          var_decls += '//   ' + name + ' is at (bp + ' + offset + ')\n';
+        }
       }
-   }
+      if (defaults.length > 0) {
+        curop += IndexVariable(name, true) + ' = ' + defaults[0] + ';\n';
+      }
+    }
 
-    function MaybeImplicitDimVariable(name) {
+    function MaybeImplicitDimVariable(name, argument_to_function) {
       // TODO: Handle array variables.
-      if (global_vars[name] !== undefined) {
-        return global_vars[name];
+      if (argument_to_function &&
+          argument_to_function.vars[name] !== undefined) {
+        return argument_to_function.vars[name];
       }
       if (vars[name] !== undefined) {
         return vars[name];
+      }
+      if (global_vars[name] !== undefined) {
+        return global_vars[name];
       }
       if (option_explicit) {
         Throw('Undeclared variable ' + name);
@@ -747,24 +789,34 @@
     }
 
     function ArrayPart(offset, i) {
-       return SIMPLE_TYPE_INFO['long'].view + '[' + ((offset >> 2) + i) + ']';
+      return SIMPLE_TYPE_INFO['long'].view +
+        '[((' + offset + '>>2)+' + i + ')]';
     }
 
     function ReserveArrayCell(name) {
-      if (vars[name] === undefined) {
+      if (vars[name] === undefined &&
+          global_vars[name] == undefined) {
         var offset = Allocate(4 + MAX_DIMENSIONS * 4 * 2);
         vars[name] = {
           offset: offset,
           dimensions: null,
           type_name: null,
+          global: vars === global_vars,
         };
-        var_decls += '// ' + name + ' is at ' + ArrayPart(offset, 0) +
+        var boffset = offset;
+        if (!vars[name].global) {
+          boffset = '(bp+' + boffset + ')';
+        }
+        var_decls += '// ' + name + ' is at ' + ArrayPart(boffset, 0) +
           ' (cell-addr: ' + offset + ')\n';
       }
-      return vars[name];
+      if (vars[name] !== undefined) {
+        return vars[name];
+      }
+      return global_vars[name];
     }
 
-    function DimVariable(default_tname, redim) {
+    function DimVariable(default_tname, redim, is_declare) {
       var name = tok;
       Next();
       // Pick default.
@@ -824,7 +876,6 @@
         }
         Throw('Variable ' + name + ' defined twice');
       }
-      // name, dims.
       if (is_scalar) {
         DimScalarVariable(name, type_name, defaults);
       } else {
@@ -838,42 +889,56 @@
           parts.push('((' + dimensions[i][1] + ')-(' +
             dimensions[i][0] + ')+1)');
         }
-        curop += 'if (' + ArrayPart(offset, 0) + ' === 0) {\n';
-        curop += '  ' + ArrayPart(offset, 0) + ' = Allocate(' +
-          [info.size].concat(parts).join('*') + ');\n';
-        for (var i = 0; i < dimensions.length; i++) {
-          curop += '  ' + ArrayPart(offset, i * 2 + 1) + ' = ' +
-            dimensions[i][0] + ';\n';
-          curop += '  ' + ArrayPart(offset, i * 2 + 2) + ' = ' +
-            [info.size].concat(parts).slice(0, i + 1).join('*') + ';\n';
+        if (!is_declare) {
+          if (!vars[name].global) {
+            offset = '(bp+' + offset + ')';
+          }
+          curop += '// Allocate ' + name + '\n';
+          curop += 'if (' + ArrayPart(offset, 0) + ' === 0) {\n';
+          curop += '  ' + ArrayPart(offset, 0) + ' = Allocate(' +
+            [info.size].concat(parts).join('*') + ');\n';
+          for (var i = 0; i < dimensions.length; i++) {
+            curop += '  ' + ArrayPart(offset, i * 2 + 1) + ' = ' +
+              dimensions[i][0] + ';\n';
+            curop += '  ' + ArrayPart(offset, i * 2 + 2) + ' = ' +
+              [info.size].concat(parts).slice(0, i + 1).join('*') + ';\n';
+          }
+          if (defaults.length > 0) {
+            if (dimensions.length > 1) {
+              Throw('Only 1-d array defaults supported');
+            }
+            if (!SIMPLE_TYPE_INFO[type_name]) {
+              Throw('Only simple type array defaults supported');
+            }
+            for (var i = 0; i < defaults.length; i++) {
+              curop += '  ' + info.view + '[' +
+                ' + (' + ArrayPart(offset, 0) + ' >> ' + info.shift + ') + '
+                + i + '] = (' + defaults[i] + ');\n';
+            }
+          }
+          curop += '}\n';
         }
-        if (defaults.length > 0) {
-          if (dimensions.length > 1) {
-            Throw('Only 1-d array defaults supported');
-          }
-          if (!SIMPLE_TYPE_INFO[type_name]) {
-            Throw('Only simple type array defaults supported');
-          }
-          for (var i = 0; i < defaults.length; i++) {
-            curop += '  ' + info.view + '[' +
-              ' + (' + ArrayPart(offset, 0) + ' >> ' + info.shift + ') + '
-              + i + '] = (' + defaults[i] + ');\n';
-          }
-        }
-        curop += '}\n';
         vars[name] = {
           offset: offset,
           dimensions: dimensions.length > 0 ? dimensions.length : -1,
           type_name: type_name,
+          global: vars === global_vars,
         };
       }
     }
 
-    function IndexVariable(name) {
-      var v = MaybeImplicitDimVariable(name);
+    function IndexVariable(name, assignable, argument_to_function) {
+      var v = MaybeImplicitDimVariable(name, argument_to_function);
       var offset = v.offset;
+      if (!v.global) {
+        if (argument_to_function) {
+          offset = '(sp+' + offset + ')';
+        } else {
+          offset = '(bp+' + offset + ')';
+        }
+      }
       var type_name = v.type_name;
-      while (tok == '(' || tok == '.') {
+      while (!argument_to_function && (tok == '(' || tok == '.')) {
         if (tok == '(') {
           Skip('(');
           var dims = [];
@@ -887,7 +952,12 @@
           }
           Skip(')');
           var info = types[type_name] || SIMPLE_TYPE_INFO[type_name];
-          var noffset = '(' + ArrayPart(offset, 0) + ' + (';
+          // Extra indirection for array parameter access.
+          if (v.dimensions === -1) {
+            offset = 'i[' + offset + ']';
+          }
+          var noffset = '(';
+          noffset += ArrayPart(offset, 0) + ' + (';
           if (v.dimensions !== -1 && dims.length != v.dimensions) {
             Throw('Array dimension expected ' + v.dimensions +
                   ' but found ' + dims.length + ', array named: ' + name);
@@ -921,14 +991,202 @@
       if (!info) {
         Throw('Expected simple type');
       }
-      return info.view + '[' + offset + '>>' + info.shift + ']';
+      var vname = info.view + '[' + offset + '>>' + info.shift + ']';
+      if (info.view == 'str' && assignable === undefined) {
+        vname = '((' + vname + ')||"")';
+      }
+      return vname;
+    }
+
+    function FunctionDefine(options) {
+      var name = tok;
+      Next();
+      if (vars !== global_vars) {
+        Throw('Nested SUB/FUNCTION not allowed');
+      }
+      if (functions[name] !== undefined && !functions[name].is_declaration) {
+        Throw('SUB/FUNCTION already defined: ' + name);
+      }
+      NewOp();
+      var pos = ops.length - 1;
+      var parameters = [];
+      var old_allocated = allocated;
+      allocated = 0;
+      vars = {};
+      var nfunc = {
+        vars: vars,
+        parameters: parameters,
+        ip: ops.length,
+        allocation: -1,
+        is_subroutine: options.is_subroutine || false,
+        is_declaration: options.is_declaration || false,
+      };
+      if (nfunc.is_declaration) {
+        if (nfunc.is_subroutine) {
+          var_decls += '// SUB ' + name + '\n';
+        } else {
+          var_decls += '// FUNCTION ' + name + '\n';
+        }
+      } else {
+        if (nfunc.is_subroutine) {
+          curop += '// SUB ' + name + '\n';
+        } else {
+          curop += '// FUNCTION ' + name + '\n';
+        }
+      }
+      if (!nfunc.is_declaration) {
+        inside_function = true;
+      }
+      DimScalarVariable(name, ImplicitType(name), []);
+      // In case return value gets redefined.
+      Align(8);
+      if (tok == '(') {
+        Skip('(');
+        if (tok != ')') {
+          parameters.push(tok);
+          DimVariable(null, undefined, true);
+          while (tok == ',') {
+            Skip(',');
+            parameters.push(tok);
+            DimVariable(null, undefined, true);
+          }
+        }
+        Skip(')');
+        Align(8);
+      }
+      nfunc.allocation = allocated;
+      if (options.is_declaration) {
+        vars = global_vars;
+        allocated = old_allocated;
+        if (functions[name] == undefined) {
+          functions[name] = nfunc;
+        } else {
+          // TODO: Check for declaration mismatch in type.
+          if (functions[name].parameters.length != nfunc.parameter.length) {
+            Throw('DECLARE and definition parameters do not match');
+          }
+        }
+      } else {
+        function_old_allocated = old_allocated;
+        function_define_pos = pos;
+        function_name = name;
+        functions[name] = nfunc;
+      }
+      if (tok == 'as') {
+        Skip('as');
+        var type_name = TypeName();
+        if (!SIMPLE_TYPE_INFO[type_name]) {
+          Throw('Expected basic type');
+        }
+        functions[name].type_name = type_name;
+      }
+      if (tok == 'static') {
+        Skip('static');
+        // TODO: Implement.
+      }
+    }
+
+    function FunctionExit() {
+      if (vars === global_vars) {
+        Throw('SUB/FUNCTION EXIT only allowed inside SUB/FUNCTION.');
+      }
+      curop += 'sp -= 8; ip = i[sp>>2];\n';
+      NewOp();
+    }
+
+    function FunctionEnd() {
+      if (vars === global_vars) {
+        Throw('SUB/FUNCTION END only allowed at end of SUB/FUNCTION.');
+      }
+      inside_function = false;
+      FunctionExit();
+      ops[function_define_pos] += 'ip = ' + ops.length + ';\n';
+      vars = global_vars;
+      Align(8);
+      functions[function_name].allocation = allocated;
+      function_name = null;
+      allocated = function_old_allocated;
+    }
+
+    function FunctionCall(name, options) {
+      var func = functions[name];
+      if (options.is_subroutine !== func.is_subroutine) {
+        if (options.is_subroutine) {
+          Throw('Expected valid subroutine name, found: ' + name);
+        } else {
+          Throw('Expected valid function name, found: ' + name);
+        }
+      }
+      curop += 'i[sp>>2] = bp; sp += 8;\n';
+      var has_parens = tok == '(' || func.parameters.length != 0;
+      if (options.is_call || (!options.is_subroutine && has_parens)) {
+        Skip('(');
+      }
+      var args = [];
+      for (var i = 0; i < func.parameters.length; ++i) {
+        if (func.vars[func.parameters[i]].dimensions == -1) {
+          var vname = tok;
+          Next();
+          Skip('(');
+          Skip(')');
+          args.push(null);
+          curop += 'i[sp + ' + func.vars[func.parameters[i]].offset + '] = ' +
+            VarPtr(vname) + ';\n';
+        } else {
+          var old_tok_count = tok_count;
+          var old_tok = tok;
+          var e = Expression();
+          curop += IndexVariable(func.parameters[i], true, func) +
+            ' = ' + e + ';\n';
+          if (vars[old_tok] && tok_count - old_tok_count == 1) {
+            args.push(old_tok);
+          } else {
+            args.push(null);
+          }
+        }
+        if (i != func.parameters.length - 1) {
+          Skip(',');
+        }
+      }
+      if (options.is_call || (!options.is_subroutine && has_parens)) {
+        Skip(')');
+      }
+      // Blank return value.
+      if (!options.is_subroutine) {
+        curop += IndexVariable(name, true, func) + ' = 123;\n';
+      }
+      curop += 'bp = sp;\n';
+      curop += 'sp += functions["' + name + '"].allocation;\n';
+      curop += 'i[sp>>2] = ip; sp += 8;\n';
+      curop += 'ip = functions["' + name + '"].ip;\n';
+      NewOp();
+      // TODO: Types?
+      curop += 'sp -= functions["' + name + '"].allocation;\n';
+      curop += 'bp = i[(sp-8)>>2];\n';
+      var temp = '#temp' + temp_count;
+      if (!options.is_subroutine) {
+        ++temp_count;
+        DimScalarVariable(temp, func.vars[name].type_name, []);
+        curop += IndexVariable(temp, true) +
+          ' = ' + IndexVariable(name, false, func) + ';\n';
+      }
+      for (var i = 0; i < args.length; ++i) {
+        if (args[i]) {
+          curop += IndexVariable(args[i], true) + ' = ' +
+            IndexVariable(func.parameters[i], false, func) + ';\n';
+        }
+      }
+      curop += 'sp -= 8;\n';
+      if (!options.is_subroutine) {
+        return IndexVariable(temp, false);
+      }
     }
 
     function End() {
       yielding = 1;
       quitting = 1;
       if (canvas) {
-        console.log('BASIC END');
+        console.log('=== BASIC END ===');
       } else {
         if (output_buffer != '') {
           PutCh(null);
@@ -975,6 +1233,14 @@
         ret += cch;
       }
       return ret;
+    }
+
+    function ToString(s) {
+      if (s < 0) {
+        return s.toString();
+      } else {
+        return ' ' + s.toString();
+      }
     }
 
     function Peek(addr) {
@@ -1069,7 +1335,8 @@
       }
       var fg = fg_color;
       var bg = bg_color;
-      var chpos = ch.charCodeAt(0) * font_height * 8;
+      var chcode = (ch.charCodeAt(0) & 0xff) >>> 0;
+      var chpos = chcode * font_height * 8;
       for (var y = 0; y < font_height; ++y) {
         var pos = text_x * 8 + (y + text_y * font_height) * display.width;
         for (var x = 0; x < 8; ++x) {
@@ -1084,6 +1351,33 @@
       if (text_y >= text_height) {
         text_y = 0;
       }
+    }
+
+    function LineInput() {
+      while (keys.length > 0) {
+        const key = keys.shift();
+        if (key == String.fromCharCode(13)) {
+          --text_x;
+          PutCh(' ');
+          PutCh(null);
+          return;
+        }
+        if (key == String.fromCharCode(8) && input_string.length > 0) {
+          input_string = input_string.substr(0, input_string.length - 1);
+          --text_x;
+          PutCh(' ');
+          text_x -= 2;
+          PutCh(String.fromCharCode(219));
+        }
+        if (key.charCodeAt(0) >= 32 && key.charCodeAt(0) <= 126) {
+          --text_x;
+          PutCh(key);
+          PutCh(String.fromCharCode(219));
+          input_string += key;
+        }
+      }
+      yielding = 1;
+      --ip;
     }
 
     function Print(items) {
@@ -1101,12 +1395,12 @@
         for (var j = 0; j < text.length; j++) {
           PutCh(text[j]);
         }
-        if (items[i+1] == ',') {
+        if (items[i + 1] == ',') {
           PutCh(' ');
           PutCh(' ');
           PutCh(' ');
         }
-        if (items[i+1] != ';' && items[i+1] != ',') {
+        if (items[i + 1] != ';' && items[i + 1] != ',') {
           PutCh(null);
         }
       }
@@ -1175,8 +1469,33 @@
     }
 
     function PrintUsing(format, items) {
+      var parts = [];
+      var p = '';
+      var has_num = false;
+      for (var i = 0; i < format.length; ++i) {
+        if (format[i] == '#' || format[i] == ',' || format[i] == '.') {
+          has_num = true;
+        } else {
+          if (has_num) {
+            parts.push(p)
+            p = '';
+            has_num = false;
+          }
+        }
+        p += format[i];
+      }
+      if (p != '') {
+        if (has_num) {
+          parts.push(p);
+        } else {
+          parts[parts.length - 1] += p;
+        }
+      }
+      var values = [];
       for (var i = 0; i < items.length; i += 2) {
-        items[i] = Using(format, items[i]);
+        if (parts.length * 2 > i) {
+          items[i] = Using(parts[(i / 2) | 0], items[i]);
+        }
       }
       Print(items);
     }
@@ -1204,20 +1523,24 @@
 
     function Color(fg, bg) {
       if (screen_mode == 0 || screen_mode > 2) {
-        fg_color = FixupColor(fg);
+        if (fg != undefined) fg_color = FixupColor(fg);
       } else {
         fg_color = FixupColor(undefined);
       }
       if (screen_mode > 0) {
         bg_color = BLACK;
       } else {
-        bg_color = FixupColor(bg);
+        if (bg != undefined) bg_color = FixupColor(bg);
       }
     }
 
     function Locate(x, y) {
       text_x = x - 1;
       text_y = y - 1;
+      // Hack to yield more often (for NIBBLES.BAS)
+      if (x == 1 && y == 1) {
+        yielding = 1;
+      }
     }
 
     function Box(x1, y1, x2, y2, c) {
@@ -1305,7 +1628,7 @@
 
     function Cls(mode) {
       // TODO: Handle mode.
-      Box(0, 0, display.width, display.height, BLACK);
+      Box(0, 0, display.width, display.height, bg_color);
       text_x = 0;
       text_y = 0;
     }
@@ -1318,19 +1641,44 @@
     }
 
     function Circle(x, y, r, c, start, end, aspect, fill) {
+      x += 0.5;
+      y += 0.5;
       var pen_color = FixupColor(c);
-      // TODO: Handle aspect.
-      if (fill) {
-        for (var i = -r; i <= r; ++i) {
-          var dx = Math.sqrt(r * r - i * i);
-          Box(x - dx, y + i, x + dx, y + i, pen_color);
-        }
+      var complete = false;
+      if (start < 0) { start = -start; complete = true; }
+      if (end < 0) { end = -end; complete = true; }
+      if (end < start) {
+        end += Math.PI * 2;
+      }
+      var rx, ry;
+      if (aspect == null) {
+        rx = r;
+        ry = r / screen_aspect;
+      } else if (aspect > 1) {
+        rx = r / aspect;
+        ry = r;
       } else {
-        for (var i = -r; i <= r; ++i) {
-          var dx = Math.sqrt(r * r - i * i);
-          Box(x - dx, y + i, x - dx, y + i, pen_color);
-          Box(x + dx, y + i, x + dx, y + i, pen_color);
-        }
+        rx = r;
+        ry = r * aspect;
+      }
+      var oxx = x + Math.cos(start) * rx;
+      var oyy = y - Math.sin(start) * ry;
+      if (complete) {
+        RawLine(x, y, oxx, oyy, pen_color);
+      }
+      for (var ang = start; ang <= end; ang += 0.03) {
+        var xx = x + Math.cos(ang) * rx;
+        var yy = y - Math.sin(ang) * ry;
+        if (ang == start) { oxx = xx; oyy = yy; }
+        RawLine(oxx, oyy, xx, yy, pen_color);
+        oxx = xx;
+        oyy = yy;
+      }
+      if (complete) {
+        RawLine(x, y, xx, yy, pen_color);
+      }
+      if (fill && start == 0 && end == Math.PI * 2) {
+        Paint(x, y, c, c);
       }
     }
 
@@ -1404,6 +1752,11 @@
           for (var x = x1; x <= x2; ++x) {
             var v = s[srcpos] | (s[srcpos + 1] << 8) | (s[srcpos + 2] << 16);
             srcpos += 3;
+            // TODO: Optimize
+            if (x < 0 || x >= display.width || y < 0 || y >= display.height) {
+              dstpos++;
+              continue;
+            }
             if (mode == 'xor') {
               dst[dstpos++] = (dst[dstpos] ^ v) | BLACK;
             } else if (mode == 'preset') {
@@ -1441,7 +1794,12 @@
               cc |= old;
             }
             var px = color_map[cc] | 0;
-            dst[dstpos++] = px;
+            // TODO: Optimize
+            if (y >= 0 && y < display.height && x >= 0 && x < display.width) {
+              dst[dstpos++] = px;
+            } else {
+              dstpos++;
+            }
             if (shift == 0) {
               shift = 8;
             }
@@ -1572,7 +1930,7 @@
     function GetVar() {
       var name = tok;
       Next();
-      return IndexVariable(name);
+      return IndexVariable(name, true);
     }
 
     var DEFAULT_TYPES = {
@@ -1667,19 +2025,23 @@
         flow.push(['do', ops.length]);
       } else if (tok == 'loop') {
         Skip('loop');
+        var is_while;
         if (tok == 'while') {
           Skip('while');
+          is_while = true;
         } else if (tok == 'until') {
           Skip('until');
-          // TODO
+          is_while = false;
         } else if (EndOfStatement()) {
           var f = flow.pop();
-          if (f[0] != 'while') {
-            Throw('LOOP does not match while');
+          if (f[0] != 'while' && f[0] != 'do') {
+            Throw('LOOP does not match DO / WHILE');
           }
           curop += 'ip = ' + f[1] + ';\n';
           NewOp();
-          ops[f[1]] += ops.length + '; }\n';
+          if (f[0] == 'while') {
+            ops[f[1]] += ops.length + '; }\n';
+          }
           return;
         } else {
           Throw('Expected while/until');
@@ -1687,16 +2049,21 @@
         var e = Expression();
         var f = flow.pop();
         if (f[0] != 'do') {
-          Throw('Loop does not match do');
+          Throw('LOOP does not match DO');
         }
-        curop += 'if (' + e + ') { ip = ' + f[1] + '; }\n';
+        if (is_while) {
+          curop += 'if (' + e + ') { ip = ' + f[1] + '; }\n';
+        } else {
+          curop += 'if (!(' + e + ')) { ip = ' + f[1] + '; }\n';
+        }
+        NewOp();
       } else if (tok == 'while') {
         Skip('while');
         var e = Expression();
         NewOp();
         curop += 'if (!(' + e + ')) { ip = ';
         NewOp();
-        flow.push(['while', ops.length-1]);
+        flow.push(['while', ops.length - 1]);
       } else if (tok == 'wend') {
         Skip('wend');
         var f = flow.pop();
@@ -1710,10 +2077,10 @@
         Skip('exit');
         if (tok == 'sub') {
           Skip('sub');
-          // TODO: Implement.
+          FunctionExit();
         } else if (tok == 'function') {
           Skip('function');
-          // TODO: Implement.
+          FunctionExit();
         } else {
           Throw('Expected sub/function');
         }
@@ -1752,12 +2119,10 @@
           }
         } else if (tok == 'sub') {
           Skip('sub');
-          vars = global_vars;
-          // TODO: Implement.
+          FunctionEnd();
         } else if (tok == 'function') {
           Skip('function');
-          vars = global_vars;
-          // TODO: Implement.
+          FunctionEnd();
         } else {
           curop += 'End();\n';
         }
@@ -1771,53 +2136,21 @@
         Skip('gosub');
         var name = tok;
         Next();
-        curop += 'rstack.push(ip);\n';
+        curop += 'i[sp>>2] = ip; sp += 8;\n';
         curop += 'ip = labels["' + name + '"];\n';
         NewOp();
       } else if (tok == 'return') {
         Skip('return');
-        curop += 'ip = rstack.pop();\n';
+        curop += 'sp -= 8; ip = i[sp>>2];\n';
         NewOp();
       } else if (tok == 'declare') {
         Skip('declare');
         if (tok == 'sub') {
           Skip('sub');
-          var name = tok;
-          Next();
-          var parameters = [];
-          vars = {};
-          subroutines[name] = {
-            parameters: parameters,
-            vars: vars,
-          };
-          Skip('(');
-          if (tok != ')') {
-            parameters.push(tok);
-            DimVariable(null);
-            while (tok == ',') {
-              Skip(',');
-              parameters.push(tok);
-              DimVariable(null);
-            }
-          }
-          Skip(')');
-          vars = global_vars;
+          FunctionDefine({is_subroutine: true, is_declaration: true});
         } else if (tok == 'function') {
           Skip('function');
-          var name = tok;
-          Next();
-          functions[name] = {};
-          vars = {};
-          Skip('(');
-          if (tok != ')') {
-            DimVariable(null);
-            while (tok == ',') {
-              Skip(',');
-              DimVariable(null);
-            }
-          }
-          Skip(')');
-          vars = global_vars;
+          FunctionDefine({is_subroutine: false, is_declaration: true});
         } else {
           Throw('Unexpected declaration');
         }
@@ -1834,6 +2167,8 @@
           vars: vars,
           size: 0,
         };
+        inside_type = true;
+        var_decls += '// TYPE ' + type_name + '\n';
         SkipEndOfStatement();
         while (tok != 'end') {
           while (!EndOfStatement()) {
@@ -1847,6 +2182,7 @@
         }
         Skip('end');
         Skip('type');
+        inside_type = false;
         types[type_name].size = allocated;
         vars = global_vars;
         allocated = old_allocated;
@@ -1864,12 +2200,13 @@
           vars[name] = {
             offset: offset,
             type_name: 'double',
+            global: vars === global_vars,
           };
           v = vars[name];
           Skip('=');
           var value = Expression();
           var_decls += SIMPLE_TYPE_INFO['double'].view +
-            '[' + (offset>>3) + ']' +
+            '[' + (offset >> 3) + ']' +
             ' = (' + value + ');  // ' + name + '\n';
           if (tok == ',') {
             Skip(',');
@@ -1895,18 +2232,38 @@
         }
       } else if (tok == 'on') {
         Skip('on');
+        var name = Expression();
         if (tok == 'error') {
           Skip('error');
-        } else {
-          Throw('Expected error');
-        }
-        if (tok == 'goto') {
-          Skip('goto');
-          var name = tok;
-          Next();
           // TODO: Implement.
+        } else if (tok == 'goto' || tok == 'gosub') {
+          var isGosub = (tok == 'gosub');
+          Next();
+          if (EndOfStatement()) {
+            Throw('Expected labels.');
+          }
+          if (isGosub) {
+            curop += 'i[sp>>2] = ip; sp += 8;\n';
+          }
+          curop += 'ip = labels[[';
+          while (!(EndOfStatement())) {
+            curop += '\'' + String(tok) + '\'';
+            Next();
+            if (EndOfStatement()) {
+              if (isGosub) {
+                curop += '][((' + name + ')|0) - 1]];\n';
+                curop += 'if(ip == undefined){ sp -= 8; ip = i[sp>>2]; }\n';
+              } else {
+                curop += '][((' + name + ')|0) - 1]] || ip;\n';
+              }
+            } else {
+              curop += tok;
+              Skip(',');
+            }
+          }
+          NewOp();
         } else {
-          Throw('Expected goto');
+          Throw('Expected GOTO/GOSUB or ERROR. Found ' + tok);
         }
       } else if (tok == 'resume') {
         Skip('resume');
@@ -1925,38 +2282,10 @@
         }
       } else if (tok == 'sub') {
         Skip('sub');
-        var name = tok;
-        Next();
-        vars = {};
-        if (tok == '(') {
-          Skip('(');
-          while (tok != ')') {
-            DimVariable(null);
-            if (tok != ',') {
-              break;
-            }
-            Skip(',');
-          }
-          Skip(')');
-        }
-        // TODO: Implement
+        FunctionDefine({is_subroutine: true});
       } else if (tok == 'function') {
         Skip('function');
-        var name = tok;
-        Next();
-        vars = {};
-        if (tok == '(') {
-          Skip('(');
-          while (tok != ')') {
-            DimVariable(null);
-            if (tok != ',') {
-              break;
-            }
-            Skip(',');
-          }
-          Skip(')');
-        }
-        // TODO: Implement
+        FunctionDefine({is_subroutine: false});
       } else if (tok == 'def') {
         Skip('def');
         if (tok == 'seg') {
@@ -1967,24 +2296,14 @@
             // TODO: Do something useful with it?
           }
         } else if (tok.substr(0, 2) == 'fn') {
-          functions[tok] = {};
-          Next();
-          vars = {};
-          Skip('(');
-          if (tok != ')') {
-            DimVariable(null);
-            while (tok == ',') {
-              Skip(',');
-              DimVariable(null);
-            }
-          }
-          Skip(')');
+          var fname = tok;
+          var pos = FunctionDefine({is_subroutine: false});
           Skip('=');
           var e = Expression();
-          // TODO: Implement.
-          vars = global_vars;
+          curop += IndexVariable(fname, true) + ' = ' + e + ';\n';
+          FunctionEnd(pos);
         } else {
-          Throw('Expected seg');
+          Throw('Expected SEG/FNxxx');
         }
       } else if (tok == 'open') {
         Skip('open');
@@ -2017,9 +2336,11 @@
         Skip('view');
         if (tok == 'print') {
           Skip('print');
-          var top = Expression();
-          Skip('to');
-          var bottom = Expression();
+          if (!EndOfStatement()) {
+            var top = Expression();
+            Skip('to');
+            var bottom = Expression();
+          }
           // TODO: Implement.
         } else if (tok == 'screen') {
           Skip('screen');
@@ -2079,7 +2400,7 @@
           Skip('base');
           if (tok == '0') {
             option_base = 0;
-          } if (tok == '1') {
+          } else if (tok == '1') {
             option_base = 1;
           } else {
             Throw('Unexpected option base "' + tok + '"');
@@ -2117,7 +2438,7 @@
       } else if (tok == 'for') {
         Skip('for');
         var name = tok;
-        var v = IndexVariable(name);
+        var v = IndexVariable(name, true);
         Next();
         Skip('=');
         var start = Expression();
@@ -2188,7 +2509,7 @@
         var c = Expression();
         var start = 0;
         var end = Math.PI * 2;
-        var aspect = 1;
+        var aspect = 'null';
         var fill = 0;
         if (tok == ',') {
           Skip(',');
@@ -2250,10 +2571,18 @@
           if (tok.substr(0, 1) == '"') {
             var prompt = tok;
             Next();
-            Skip(';');
+            if (tok == ';' || tok == ',') {
+              Next();
+            }
           }
+          curop += 'Print([' + prompt + ', ";"]);\n';
+          curop += 'PutCh(String.fromCharCode(219));\n';
+          curop += 'input_string = ""\n';
+          NewOp();
+          curop += 'LineInput();\n';
+          NewOp();
           var a = GetVar();
-          // TODO: Implement.
+          curop += a + ' = input_string;\n';
           return;
         }
         var x1 = pen_x;
@@ -2310,7 +2639,7 @@
         Next();
         var v = ArrayPart(ReserveArrayCell(name).offset, 0);
         curop += 'GetImage(' + x1 + ', ' + y1 + ', ' +
-          x2 + ', ' +  y2 + ', buffer, ' + v + ');\n';
+          x2 + ', ' + y2 + ', buffer, ' + v + ');\n';
       } else if (tok == 'put') {
         Skip('put');
         Skip('(');
@@ -2386,8 +2715,9 @@
         curop += 'Width(' + w + ');\n';
       } else if (tok == 'color') {
         Skip('color');
-        var fg = Expression();
-        var bg = 0;
+        var fg;
+        var bg;
+        if (tok != ',') fg = Expression();
         if (tok == ',') {
           Skip(',');
           bg = Expression();
@@ -2434,25 +2764,35 @@
         if (tok[0] == '#') {
           // TODO: Implement.
           Next();
-          Skip(',');
+          if (tok == ';' || tok == ',') {
+            Next();
+          }
         }
         if (tok == ';') {
           Skip(';');
         }
-        var prompt = '""';
+        var prompt = '"? "';
         if (tok.substr(0, 1) == '"') {
           var prompt = tok;
           Next();
-          Skip(';');
+          if (tok == ';' || tok == ',') {
+            Next();
+          }
         }
+        curop += 'Print([' + prompt + ', ";"]);\n';
+        curop += 'PutCh(String.fromCharCode(219));\n';
+        curop += 'input_string = ""\n';
+        NewOp();
+        curop += 'LineInput();\n';
+        NewOp();
+        var n = 0;
         while (!EndOfStatement()) {
-          var v = GetVar();
+          curop += GetVar() + ' = input_string.split(",")[' + n++ + '];\n';
           if (tok != ',') {
             break;
           }
           Skip(',');
         }
-        // TODO: Implement.
       } else if (tok == 'print') {
         Skip('print');
         if (EndOfStatement()) {
@@ -2545,48 +2885,38 @@
         }
       } else if (tok == '') {
         return;
-      } else if (tok == 'call' || subroutines[tok] !== undefined) {
-        var is_call = false;
-        if (tok == 'call') {
-          Next();
-          is_call = true;
-        }
-        var sub = subroutines[tok];
-        if (sub === undefined) {
-          Throw('Expected valid subroutine name');
-        }
+      } else if (tok == 'call' || (functions[tok] !== undefined &&
+                                   functions[tok].is_subroutine)) {
+        var name = tok;
         Next();
-        if (is_call) { Skip('('); }
-        for (var i = 0; i < sub.parameters.length; ++i) {
-          if (sub.vars[sub.parameters[i]].dimensions == -1) {
-            var vname = tok;
-            Next();
-            Skip('(');
-            Skip(')');
-          } else {
-            var e = Expression();
-          }
-          if (i != sub.parameters.length - 1) {
-            Skip(',');
-          }
+        if (name == 'call') {
+          name = tok;
+          Next();
+          FunctionCall(name, {is_subroutine: true, is_call: true});
+        } else {
+          FunctionCall(name, {is_subroutine: true});
         }
-        if (is_call) { Skip(')'); }
       } else {
         var name = tok;
         Next();
         if (tok == ':') {
           Skip(':');
           AddLabel(name);
+          Statement();
           return;
         }
-        var vname = IndexVariable(name);
+        if (name == 'let') {
+          name = tok;
+          Next();
+        }
+        var vname = IndexVariable(name, true);
         if (tok == '=' || tok == '+=' || tok == '-=' ||
             tok == '*=' || tok == '/=' || tok == '\\=' ||
             tok == '^=' || tok == '&=') {
           var op = tok;
           Next();
           var e = Expression();
-          if (op == '&='){
+          if (op == '&=') {
             op = '+=';
           } else if (op == '\\=') {
             op = '//=';
@@ -2636,13 +2966,18 @@
       // Align to 8.
       Align(8);
 
+      // Allocate stack.
+      stack = Allocate(STACK_SIZE);
+      sp = stack;
+      bp = sp;
+
       var total = '';
       total += 'var buffer = new ArrayBuffer(' +
           allocated + ' + ' + DYNAMIC_HEAP_SIZE + ');\n';
       for (var i in SIMPLE_TYPE_INFO) {
         var info = SIMPLE_TYPE_INFO[i];
         if (i == 'string') {
-          total += 'var str = new Array(' + str_count + ');\n';
+          total += 'var str = [];\n';
         } else {
           total += 'var ' + info.view +
             ' = new ' + info.array + '(buffer);\n';
@@ -2665,8 +3000,10 @@
     var viewport_w, viewport_h;
 
     function Resize() {
-      canvas.width  = window.innerWidth;
-      canvas.height = window.innerHeight;
+      if (from_tag) {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+      }
       var raspect = canvas.width / canvas.height;
       var aspect = display.width / (display.height * screen_aspect);
       if (raspect > aspect) {
@@ -2695,23 +3032,92 @@
       var ctx = canvas.getContext('2d');
       ctx.fillStyle = '#111';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-//      ctx.imageSmoothingQuality = 'low';
-//      ctx.imageSmoothingEnabled = false;
+      //      ctx.imageSmoothingQuality = 'low';
+      //      ctx.imageSmoothingEnabled = false;
       ctx.drawImage(scale_canvas, viewport_x, viewport_y,
         viewport_w, viewport_h);
       requestAnimationFrame(Render);
     }
 
+    function RegularKey(n) {
+      keys.push(String.fromCharCode(n));
+    }
+
+    function ExtendedKey(n) {
+      keys.push(String.fromCharCode(0) + String.fromCharCode(n));
+    }
+
     function InitEvents() {
+      const SIMPLE_KEYMAP = {
+        // BACKSPACE, ENTER, ESCAPE
+        8: { regular: 8 }, 13: { regular: 13 }, 27: { regular: 27 },
+        // INS, DEL
+        45: { regular: 82 }, 46: { regular: 83 },
+        // LEFT, RIGHT
+        37: { extended: 75 }, 39: { extended: 77 },
+        // UP, DOWN
+        38: { extended: 72 }, 40: { extended: 80 },
+        // PGUP, PGDN
+        33: { extended: 73 }, 34: { extended: 81 },
+        // HOME, END
+        36: { extended: 71 }, 35: { extended: 79 },
+      };
       if (!canvas) {
         return;
       }
       Resize();
-      window.addEventListener('resize', Resize, false);
+      if (from_tag) {
+        window.addEventListener('resize', Resize, false);
+      }
       window.addEventListener('keydown', function(e) {
-        var k = e.key;
-        if (k == 'Escape') { k = String.fromCharCode(27); }
-        keys.push(k);
+        if (e.keyCode >= 112 && e.keyCode <= 123) {
+          // F1 - F10
+          if (e.altKey) {
+            ExtendedKey(e.keyCode - 112 + 104);
+          } else if (e.ctrlKey) {
+            ExtendedKey(e.keyCode - 112 + 94);
+          } else if (e.shiftKey) {
+            ExtendedKey(e.keyCode - 112 + 84);
+          } else {
+            ExtendedKey(e.keyCode - 112 + 59);
+          }
+        } else if (e.keyCode == 9) {
+          // TAB, Shift-TAB
+          if (e.shiftKey) {
+            RegularKey(15);
+          } else {
+            RegularKey(9);
+          }
+        } else if (SIMPLE_KEYMAP[e.keyCode]) {
+          if (SIMPLE_KEYMAP[e.keyCode].regular) {
+            RegularKey(SIMPLE_KEYMAP[e.keyCode].regular);
+          } else {
+            ExtendedKey(SIMPLE_KEYMAP[e.keyCode].extended);
+          }
+        } else if (e.ctrlKey && e.keyCode >= 65 && e.keyCode <= 90) {
+          // Ctrl-A to Ctrl-Z
+          RegularKey(e.keyCode - 65 + 1);
+        } else if (e.altKey) {
+          const ch = String.fromCharCode(e.keyCode);
+          const row1 = '1234567890-='.indexOf(ch);
+          const row2 = 'QWERTYUIOP'.indexOf(ch);
+          const row3 = 'ASDFGHJKL'.indexOf(ch);
+          const row4 = 'ZXCVBNM'.indexOf(ch);
+          if (row1 >= 0) {
+            ExtendedKey(row1 + 120);
+          } else if (row2 >= 0) {
+            ExtendedKey(row2 + 16);
+          } else if (row3 >= 0) {
+            ExtendedKey(row3 + 30);
+          } else if (row4 >= 0) {
+            ExtendedKey(row4 + 44);
+          }
+        } else {
+          const code = e.key.charCodeAt(0);
+          if (e.key.length == 1 && code >= 32 && code <= 126) {
+            RegularKey(code);
+          }
+        }
       }, false);
       canvas.addEventListener('mousemove', function(e) {
         // TODO: Generalize for non-fullscreen.
@@ -2722,12 +3128,25 @@
         mouse_y = Math.floor(
           (e.clientY - rect.top - viewport_y) * display.height / viewport_h);
       }, false);
+      canvas.addEventListener('touchmove', function(e) {
+        var touch = e.touches.item(0);
+        const evt = new Event('mousemove');
+        evt.clientX = touch.clientX;
+        evt.clientY = touch.clientY;
+        canvas.dispatchEvent(evt);
+      }, false);
       canvas.addEventListener('mousedown', function(e) {
         mouse_buttons = 1;
+      }, false);
+      canvas.addEventListener('touchstart', function(e) {
+        canvas.dispatchEvent(new Event('mousedown'));
       }, false);
       canvas.addEventListener('mouseup', function(e) {
         mouse_buttons = 0;
       }, false);
+      canvas.addEventListener('touchend', function(e) {
+        canvas.dispatchEvent(new Event('mouseup'));
+      }, false)
       // TODO: Implement Mouse Wheel!
       // TODO: Implement Mouse Clip!
     }
@@ -2765,7 +3184,7 @@
     } catch (e) {
       if (canvas) {
         Locate(1, 1);
-        Color(WHITE);
+        Color(15);
         Print([e.toString(), ';']);
       } else {
         console.error(e.toString());
@@ -2832,13 +3251,13 @@
       var canvas = SetupCanvas(tag, full_window);
       if (tags[t].src) {
         var request = new XMLHttpRequest();
-        request.addEventListener("load", function(e) {
-          Interpret(request.responseText, canvas);
+        request.addEventListener('load', function(e) {
+          Interpret(request.responseText, canvas, true);
         }, false);
-        request.open("GET", tag.src);
+        request.open('GET', tag.src);
         request.send();
       } else {
-        Interpret(tag.text, canvas);
+        Interpret(tag.text, canvas, true);
       }
     }
   }
@@ -2852,6 +3271,7 @@
       window.addEventListener('focusin', function() {
         timer_offset = timer_halted - (new Date().getTime() / 1000);
       });
+      window.Basic = Interpret;
     } else {
       exports.Basic = function(code) {
         Interpret(code, null);
@@ -2896,22 +3316,13 @@
     '\u00b0\u2219\u00b7\u221a\u207f\u00b2\u25a0\u0020';
 
   var FONT8 =
-    '          XXX     XXX                                           ' +
+    'x     x   XXX     XXX   xx   xx x     x                         ' +
     '         X   X   XXXXX                                          ' +
-    '        X X X X XX X XX                                         ' +
+    '        X X X X XX X XX            x                            ' +
     '        X     X XXXXXXX                                         ' +
     '        X XXX X XX   XX                                         ' +
     '         X   X   XXXXX                                          ' +
-    '          XXX     XXX                                           ' +
-    '                                                                ' +
-
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
+    'x     x   XXX     XXX   xx   xx x     x                         ' +
     '                                                                ' +
 
     'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
@@ -2930,6 +3341,15 @@
     'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
     'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
     'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    '                                                                ' +
+
+    '   X       X                    XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    '  XXX      X        X     X     XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    ' XXXXX     X        XX   XX     XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    '   X       X    XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    '   X     XXXXX      XX   XX     XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    '   X      XXX       X     X     XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    '   X       X                    XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
     '                                                                ' +
 
     '           XX    XX XX   XX XX   XX XX  XX       XXX       XX   ' +
@@ -3004,54 +3424,60 @@
     'XX   XX   XXX   XXXXXXX  XXXXX       XX  XXXXX                  ' +
     '                                                        XXXXXXX ' +
 
-    '  XX            XX                   XX           XXXX          ' +
-    '   XX           XX                   XX          XX  XX         ' +
-    '                XX                   XX  XXXX     XX            ' +
-    '         XXXXXX XXXXXX   XXXXX   XXXXXX XX  XX  XXXXXXX  XXXXX  ' +
+    '  XX            XX                   XX            XXXX         ' +
+    '   XX           XX                   XX           XX            ' +
+    '         XXXXXX XX       XXXXX       XX  XXXX     XX     XXXXX  ' +
+    '        XX   XX XXXXXX  XX       XXXXXX XX  XX  XXXXXXX XX   XX ' +
     '        XX   XX XX   XX XX      XX   XX XXXXXX    XX    XX   XX ' +
     '        XX   XX XX   XX XX      XX   XX XX        XX     XXXXXX ' +
     '         XXXXXX XXXXXX   XXXXX   XXXXXX  XXXXX    XX         XX ' +
     '                                                         XXXXX  ' +
-    'XX        XX       XX   XX       XX                             ' +
-    'XX        XX       XX   XX       XX                             ' +
-    'XX                      XX  XX   XX                             ' +
-    'XXXXXX   XXXX    XXXXX  XX XX    XX     XXXXXX  XXXXXX   XXXXX  ' +
-    'XX   XX   XX       XX   XXXX     XX     XX X XX XX   XX XX   XX ' +
-    'XX   XX   XX        XX  XX  XX   XX     XX X XX XX   XX XX   XX ' +
-    'XX   XX   XXXX      XX  XX   XX   XXXXX XX X XX XX   XX  XXXXX  ' +
+
+    'XX        XX       XX   XX        XXX                           ' +
+    'XX                      XX   XX    XX                           ' +
+    'XXXXXX   XXX      XXXX  XX  XX     XX   XXXXXX  XXXXXX   XXXXX  ' +
+    'XX   XX   XX        XX  XXXXX      XX   XX X XX XX   XX XX   XX ' +
+    'XX   XX   XX        XX  XX  XX     XX   XX X XX XX   XX XX   XX ' +
+    'XX   XX   XX        XX  XX   XX    XX   XX X XX XX   XX XX   XX ' +
+    'XX   XX  XXXX       XX  XX   XX   XXXX  XX X XX XX   XX  XXXXX  ' +
     '                  XXX                                           ' +
+
     '                                                                ' +
     '                                  XX                            ' +
-    '                         XXXXXX   XX                            ' +
-    'XXXXXX   XXXXX  XX XXX  XX      XXXXXXX XX   XX XX   XX XX   XX ' +
-    'XX   XX XX  XX  XXXX XX  XXXXX    XX    XX   XX XX   XX XX X XX ' +
+    'XXXXXX   XXXXX  XX XXX   XXXXXX   XX    XX   XX XX   XX XX   XX ' +
+    'XX   XX XX  XX  XXXX XX XX      XXXXXXX XX   XX XX   XX XX   XX ' +
+    'XX   XX XX  XX  XX       XXXXX    XX    XX   XX XX   XX XX X XX ' +
     'XXXXXX   XXXXX  XX           XX   XX XX XX   XX  XX XX  XX X XX ' +
-    'XX         XX   XX      XXXXXX     XXX   XXXXXX   XXX    XXXXX  ' +
-    'XX          XXX                                                 ' +
+    'XX          XX  XX      XXXXXX     XXX   XXXXXX   XXX    XXXXX  ' +
+    'XX          XX                                                  ' +
+
     '                             XX   XX    XX                 X    ' +
     '                           XX     XX      XX     XXX XX   XXX   ' +
-    '                           XX     XX      XX    XX XXX   XX XX  ' +
-    'XX   XX XX   XX XXXXXXX   XX      XX       XX           XX   XX ' +
-    ' XXXXX  XX   XX    XXX     XX     XX      XX            XX   XX ' +
-    ' XXXXX   XXXXXX  XXX       XX     XX      XX            XX   XX ' +
+    'XX   XX XX   XX XXXXXXX    XX     XX      XX    XX XXX   XX XX  ' +
+    ' XX XX  XX   XX    XXX    XX      XX       XX           XX   XX ' +
+    '  XXX   XX   XX   XXX      XX     XX      XX            XX   XX ' +
+    ' XX XX   XXXXXX  XXX       XX     XX      XX            XX   XX ' +
     'XX   XX      XX XXXXXXX      XX   XX    XX              XXXXXXX ' +
     '         XXXXX                                                  ' +
+
     ' XXXXXX                                                  XXXXXX ' +
     'XX      XX   XX                                         XX      ' +
-    'XX               XXXX                                   XX      ' +
-    'XX      XX   XX XX  XX   XXXXXX  XXXXXX  XXXXXX  XXXXXX XX      ' +
+    'XX               XXXX    XXXXXX  XXXXXX  XXXXX   XXXXXX XX      ' +
+    'XX      XX   XX XX  XX  XX   XX XX   XX XX   XX XX   XX XX      ' +
     'XX      XX   XX XXXXXX  XX   XX XX   XX XX   XX XX   XX XX      ' +
     'XX      XX   XX XX      XX   XX XX   XX XX   XX XX   XX XX      ' +
     ' XXXXXX  XXXXXX  XXXXX   XXXXXX  XXXXXX  XXXXXX  XXXXXX  XXXXXX ' +
     '                                                                ' +
+
     '                          XX      XX      XX      XXX     XXX   ' +
     '                          XX      XX      XX     XX XX   XX XX  ' +
     ' XXXX    XXXX    XXXX                           XX   XX XX   XX ' +
-    'XX  XX  XX  XX  XX  XX   XXXX    XXXX    XXXX   XXXXXXX XXXXXXX ' +
+    'XX  XX  XX  XX  XX  XX   XXX     XXX     XXX    XXXXXXX XXXXXXX ' +
     'XXXXXX  XXXXXX  XXXXXX    XX      XX      XX    XX   XX XX   XX ' +
     'XX      XX      XX        XX      XX      XX    XX   XX XX   XX ' +
-    ' XXXXX   XXXXX   XXXXX    XXXX    XXXX    XXXX  XX   XX XX   XX ' +
+    ' XXXXX   XXXXX   XXXXX   XXXX    XXXX    XXXX   XX   XX XX   XX ' +
     '                                                                ' +
+
     'XXXXXXX XXXXXXX XXXXXXX                                         ' +
     'XX      XX      XX                                              ' +
     'XX      XX      XX                                              ' +
@@ -3060,22 +3486,25 @@
     'XX      XX      XX      XX   XX XX   XX XX   XX XX   XX XX   XX ' +
     'XXXXXXX XXXXXXX XXXXXXX  XXXXX   XXXXX   XXXXX   XXXXXX  XXXXXX ' +
     '                                                                ' +
+
     '         XXXXX  XX   XX  XXXXXX  XXXXXX  XXXXXX  XXXXXX  XXXXXX ' +
     '        XX   XX XX   XX XX      XX      XX      XX      XX      ' +
-    '        XX   XX XX   XX XX      XX      XX      XX      XX      ' +
+    'XX   XX XX   XX XX   XX XX      XX      XX      XX      XX      ' +
     'XX   XX XX   XX XX   XX XX      XX      XX      XX      XX      ' +
     'XX   XX XX   XX XX   XX XX      XX      XX      XX      XX      ' +
     ' XXXXXX XX   XX XX   XX XX      XX      XX      XX      XX      ' +
     '     XX  XXXXX   XXXXX   XXXXXX  XXXXXX  XXXXXX  XXXXXX  XXXXXX ' +
     ' XXXXX                                                          ' +
+
     '          XX                                                    ' +
     '          XX                                                    ' +
-    '                                                                ' +
-    ' XXXXXX  XXXX    XXXXX  XX   XX XXXXXX  XXXXXX   XXXXXX  XXXXX  ' +
+    ' XXXXXX          XXXXX  XX   XX XXXXXX  XXXXXX   XXXXXX  XXXXX  ' +
+    'XX   XX  XXX    XX   XX XX   XX XX   XX XX   XX XX   XX XX   XX ' +
     'XX   XX   XX    XX   XX XX   XX XX   XX XX   XX XX   XX XX   XX ' +
     'XX   XX   XX    XX   XX XX   XX XX   XX XX   XX XX   XX XX   XX ' +
-    ' XXXXXX   XXXX   XXXXX   XXXXXX XX   XX XX   XX  XXXXXX  XXXXX  ' +
+    ' XXXXXX  XXXX    XXXXX   XXXXXX XX   XX XX   XX  XXXXXX  XXXXX  ' +
     '                                                                ' +
+
     '   XX                   X       X          XX                   ' +
     '                        X  X    X  X              XX XX XX XX   ' +
     '   XX                     X       X        XX    XX XX   XX XX  ' +
@@ -3084,6 +3513,7 @@
     'XX   XX XX           XX     X       X      XX     XX XX XX XX   ' +
     ' XXXXX                     XXXX    XXXX    XX                   ' +
     '                                                                ' +
+
     'X   X    X X X X XXX XXX   X       X       X      X X           ' +
     '  X   X X X X X XX XXX X   X       X       X      X X           ' +
     'X   X    X X X X XXX XXX   X       X    XXXX      X X           ' +
@@ -3092,6 +3522,7 @@
     '  X   X X X X X XX XXX X   X       X       X      X X     X X   ' +
     'X   X    X X X X XXX XXX   X       X       X      X X     X X   ' +
     '  X   X X X X X XX XXX X   X       X       X      X X     X X   ' +
+
     '          X X     X X             X X     X X      X            ' +
     '          X X     X X             X X     X X      X            ' +
     'XXXX    XXX X     X X   XXXXX   XXX X     X X   XXXX            ' +
@@ -3100,6 +3531,7 @@
     '   X      X X     X X     X X                              X    ' +
     '   X      X X     X X     X X                              X    ' +
     '   X      X X     X X     X X                              X    ' +
+
     '   X       X               X               X       X      X X   ' +
     '   X       X               X               X       X      X X   ' +
     '   X       X               X               X       XXXXX  X X   ' +
@@ -3108,6 +3540,7 @@
     '                   X       X               X       X      X X   ' +
     '                   X       X               X       X      X X   ' +
     '                   X       X               X       X      X X   ' +
+
     '  X X             X X             X X             X X      X    ' +
     '  X X             X X             X X             X X      X    ' +
     '  X XXXX  XXXXXXXXX XXXXXXXXXXXX  X XXXXXXXXXXXXXXX XXXXXXXXXXXX' +
@@ -3116,6 +3549,7 @@
     '          X X             X X     X X             X X           ' +
     '          X X             X X     X X             X X           ' +
     '          X X             X X     X X             X X           ' +
+
     '  X X                     X X      X                      X X   ' +
     '  X X                     X X      X                      X X   ' +
     '  X X   XXXXXXXX          X X      XXXXX   XXXXX          X X   ' +
@@ -3124,6 +3558,7 @@
     '           X      X X                      X      X X     X X   ' +
     '           X      X X                      X      X X     X X   ' +
     '           X      X X                      X      X X     X X   ' +
+
     '   X       X            XXXXXXXX        XXXX        XXXXXXXXXXXX' +
     '   X       X            XXXXXXXX        XXXX        XXXXXXXXXXXX' +
     'XXXXXXXX   X            XXXXXXXX        XXXX        XXXXXXXXXXXX' +
@@ -3132,6 +3567,7 @@
     '   X               X    XXXXXXXXXXXXXXXXXXXX        XXXX        ' +
     '   X               X    XXXXXXXXXXXXXXXXXXXX        XXXX        ' +
     '   X               X    XXXXXXXXXXXXXXXXXXXX        XXXX        ' +
+
     '          XXX    XXXXXX          XXXXXX                         ' +
     ' XX   X  X   X   X               X                              ' +
     'X  X X   X  X    X                X                             ' +
@@ -3140,29 +3576,32 @@
     ' XX   X  X    X  X        X  X   X      X    X                  ' +
     '        X XXXX   X        X  X   XXXXXX  XXXX                   ' +
     '                                                                ' +
+
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
     '                                                                ' +
+
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
     '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
-    '                                                                ' +
+
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXX XXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XX   XX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXX XXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XX   XX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXX XXX XXXXXXX XXXXXXX ' +
+    'XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX XXXXXXX ' +
     '                                                                ' +
     '';
 })();

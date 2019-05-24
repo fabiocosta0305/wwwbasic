@@ -16,87 +16,42 @@
 
 var basic_test = require('./basic-tester.js');
 
-basic_test.BASIC_TEST('DoLoopWhile', 'OneToFive', `
-i = 1
-DO
-  PRINT i
-  i = i + 1
-LOOP WHILE i <= 5
+basic_test.BASIC_TEST('OptionBase', 'Zero', `
+OPTION BASE 0
+DIM a(10)
+FOR i = 0 to 10
+  a(i) = i + 1
+NEXT i
+t = 0
+FOR i = 0 to 10
+  t = t + a(i)
+NEXT i
+PRINT t
 `, `
-1
-2
-3
-4
-5
+66
 `);
 
-basic_test.BASIC_TEST('DoLoopWhile', 'SixToOne', `
-i = 6
-DO
-  PRINT i
-  i = i - 1
-LOOP WHILE i > 0
+basic_test.BASIC_TEST('OptionBase', 'One', `
+OPTION BASE 1
+DIM a(10)
+FOR i = 1 to 10
+  a(i) = i + 1
+NEXT i
+t = 0
+FOR i = 1 to 10
+  t = t + a(i)
+NEXT i
+PRINT t
 `, `
-6
-5
-4
-3
-2
-1
+65
+`, `
 `);
 
-basic_test.BASIC_TEST('DoLoopWhile', 'LoopUntilSixToOne', `
-i = 6
-DO
-  PRINT i
-  i = i - 1
-LOOP UNTIL i = 0
+basic_test.BASIC_TEST('OptionBase', 'Bad', `
+OPTION BASE 2
 `, `
-6
-5
-4
-3
-2
-1
+`, `
+Unexpected option base "2" at line 1
 `);
 
-basic_test.BASIC_TEST('DoLoopWhile', 'LoopSideBySide', `
-i = 6
-DO
-  PRINT i
-  i = i - 1
-LOOP UNTIL i = 0
-DO
-  PRINT i
-  i = i + 1
-LOOP UNTIL i = 4
-`, `
-6
-5
-4
-3
-2
-1
-0
-1
-2
-3
-`);
-
-basic_test.BASIC_TEST('DoLoopWhile', 'JustDoLoop', `
-i = 6
-DO
-  PRINT i
-  i = i - 1
-  IF i = 0 THEN GOTO done
-LOOP
-done:
-`, `
-6
-5
-4
-3
-2
-1
-`);
 

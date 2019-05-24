@@ -1,3 +1,4 @@
+#! /bin/bash
 # Copyright 2018 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,15 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-language: node_js
+set -e
 
-node_js:
-  - "node"
+# Move to root of project.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+cd ${SCRIPT_DIR}/..
 
-script:
-  - bash ./test/run-tests.sh
+LINTER_DIR=./third_party/install_linter
+ESLINT=${LINTER_DIR}/node_modules/.bin/eslint
 
-os:
-  - linux
-  - osx
+# Install or update eslint as needed.
+OLD_PWD=$(pwd)
+if [ -f ${ESLINT} ]; then
+  cd ${LINTER_DIR}
+  npm update
+else
+  mkdir -p ${LINTER_DIR}
+  cd ${LINTER_DIR}
+  npm init -y
+  npm install eslint --save-dev
+fi
+cd ${OLD_PWD}
 
+# Lint it.
+${ESLINT} $* \
+    --ignore-pattern '!.eslintrc.js' \
+    .eslintrc.js wwwbasic.js test/ tools/

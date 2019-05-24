@@ -58,3 +58,48 @@ PRINT 3*2^4
 48
 `);
 
+basic_test.BASIC_TEST('BasicOps', 'Let', `
+LET x = 2
+LET y = 3
+PRINT x * y
+`, `
+6
+`);
+
+basic_test.BASIC_TEST('BasicOps', 'Mod', `
+LET x = 5
+LET y = 3
+PRINT x mod y
+`, `
+2
+`);
+
+basic_test.BASIC_TEST('BasicOps', 'FloorDivide', `
+LET x = 7
+LET y = 3
+PRINT x \\ y
+`, `
+2
+`);
+
+basic_test.BASIC_TEST('BasicOps', 'Not', `
+DEFINT A-Z
+CONST TRUE = -1
+CONST FALSE = NOT TRUE
+foo = TRUE
+bar = FALSE
+PRINT foo = TRUE
+PRINT foo = FALSE
+PRINT bar = TRUE
+PRINT bar = FALSE
+PRINT TRUE
+PRINT FALSE
+`, `
+-1
+0
+0
+-1
+-1
+0
+`);
+

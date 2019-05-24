@@ -16,87 +16,23 @@
 
 var basic_test = require('./basic-tester.js');
 
-basic_test.BASIC_TEST('DoLoopWhile', 'OneToFive', `
-i = 1
-DO
-  PRINT i
-  i = i + 1
-LOOP WHILE i <= 5
-`, `
-1
-2
-3
-4
-5
-`);
-
-basic_test.BASIC_TEST('DoLoopWhile', 'SixToOne', `
-i = 6
-DO
-  PRINT i
-  i = i - 1
-LOOP WHILE i > 0
-`, `
-6
-5
-4
-3
-2
-1
-`);
-
-basic_test.BASIC_TEST('DoLoopWhile', 'LoopUntilSixToOne', `
-i = 6
-DO
-  PRINT i
-  i = i - 1
-LOOP UNTIL i = 0
-`, `
-6
-5
-4
-3
-2
-1
-`);
-
-basic_test.BASIC_TEST('DoLoopWhile', 'LoopSideBySide', `
-i = 6
-DO
-  PRINT i
-  i = i - 1
-LOOP UNTIL i = 0
-DO
-  PRINT i
-  i = i + 1
-LOOP UNTIL i = 4
-`, `
-6
-5
-4
-3
-2
-1
-0
+basic_test.BASIC_TEST('Formatting', 'CRLF',
+  'FOR i = 1 TO 3\r\n' +
+    '  PRINT i\r\n' +
+    'NEXT i\r\n'
+  , `
 1
 2
 3
 `);
 
-basic_test.BASIC_TEST('DoLoopWhile', 'JustDoLoop', `
-i = 6
-DO
-  PRINT i
-  i = i - 1
-  IF i = 0 THEN GOTO done
-LOOP
-done:
-`, `
-6
-5
-4
-3
-2
+basic_test.BASIC_TEST('Formatting', 'Tabs',
+  'FOR i = 1 TO 3\n' +
+    '\tPRINT i\n' +
+    'NEXT i\n'
+  , `
 1
+2
+3
 `);
 
